@@ -1,6 +1,8 @@
 import threading
 import glob
+import requests
 import re
+from zipfile import ZipFile
 from socket import gethostname
 import shutil
 import json
@@ -19,7 +21,7 @@ import yaml
 
 from worker.imagebuilder import ImageBuilder
 from utils.imagemeta import ImageMeta
-from utils.common import create_folder, get_hash, get_folder, setup_gnupg, sign_file, get_pubkey
+from utils.common import create_folder, get_hash, get_folder, setup_gnupg, usign_sign, get_pubkey
 from utils.config import Config
 from utils.database import Database
 
@@ -182,20 +184,24 @@ class Image(ImageMeta):
                 if not self.vanilla:
                     path_array.append(self.manifest_hash)
 
-                store_path = os.path.join(*path_array)
-                create_folder(store_path)
+                self.store_path = os.path.join(*path_array)
+                self.store_path = "/tmp/workers/"
+                create_folder(self.store_path)
 
-                for filename in os.listdir(self.build_path):
-                    filename_output = filename.replace("lede", self.distro)
-                    filename_output = filename_output.replace(self.imagebuilder.imagebuilder_release, self.release)
-                    filename_output = filename_output.replace(self.request_hash, self.manifest_hash)
-                    if not os.path.exists(os.path.join(store_path, filename_output)) or entry_missing:
-                        self.log.info("move file %s", filename_output)
-                        shutil.move(os.path.join(self.build_path, filename), os.path.join(store_path, filename_output))
-                    else:
-                        self.log.info("file %s exists so image was created before", filename_output)
-                        already_created = True
-                        break
+                with ZipFile(os.path.join(self.store_path, self.request_hash + ".zip"), 'w') as archive:
+                    for filename in os.listdir(self.build_path):
+                        filename_output = filename.replace("lede", self.distro)
+                        # this is done for libremesh as imagebuilder release is different from lime release
+                        filename_output = filename_output.replace(self.imagebuilder.imagebuilder_release, self.release)
+                        filename_output = filename_output.replace(self.request_hash, self.manifest_hash)
+                        if not os.path.exists(os.path.join(self.store_path, filename_output)) or entry_missing:
+                            self.log.info("move file %s", filename_output)
+                            shutil.move(os.path.join(self.build_path, filename), os.path.join(self.store_path, filename_output))
+                            archive.write(os.path.join(self.store_path, filename_output), arcname=filename_output)
+                        else:
+                            self.log.info("file %s exists so image was created before", filename_output)
+                            already_created = True
+                            break
 
                 if not already_created or entry_missing:
                     sysupgrade_files = [ "*-squashfs-sysupgrade.bin", "*-squashfs-sysupgrade.tar",
@@ -206,7 +212,7 @@ class Image(ImageMeta):
 
                     for sysupgrade_file in sysupgrade_files:
                         if not sysupgrade:
-                            sysupgrade = glob.glob(os.path.join(store_path, sysupgrade_file))
+                            sysupgrade = glob.glob(os.path.join(self.store_path, sysupgrade_file))
                         else:
                             break
 
@@ -251,7 +257,7 @@ class Image(ImageMeta):
                     self.name = "-".join(name_array)
 
                     if self.config.get("sign_images"):
-                        if sign_file(self.path):
+                        if usign_sign(self.path):
                             self.log.info("signed %s", self.path)
                         else:
                             self.database.set_image_requests_status(self.request_hash, 'signing_fail')
@@ -319,6 +325,18 @@ class Image(ImageMeta):
         with open(glob.glob(os.path.join(self.build_path, '*.manifest'))[0], "r") as manifest_file:
             manifest_packages = re.findall(manifest_pattern, manifest_file.read())
             self.database.add_manifest_packages(self.manifest_hash, manifest_packages)
+
+    def upload_image(self):
+        url = os.path.join(self.config.get("update_server"), "upload-image")
+        data = {
+                "request_hash": self.request_hash,
+                "worker_id": self.worker_id
+                }
+        files = {
+                'archive': open(archive_file, 'rb'),
+                'signature': open(archive_file + ".sig", 'rb')
+                }
+
 
     # check if image exists
     def created(self):

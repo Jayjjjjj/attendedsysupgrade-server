@@ -22,9 +22,13 @@ class Database():
         self.log.info("database connected")
 
     def commit(self):
+        """simply commits changes to database"""
+
         self.cnxn.commit()
 
     def create_tables(self):
+        """opens file tables.sql and creates the basic databse schema"""
+
         self.log.info("creating tables")
         with open('tables.sql') as t:
             self.c.execute(t.read())
@@ -32,18 +36,24 @@ class Database():
         self.log.info("created tables")
 
     def set_distro_alias(self, distro, alias):
+        """sets an alias for an distribution to look better in interfaces"""
+
         self.log.info("set alias %s/%s ", distro, alias)
         sql = "UPDATE distributions SET alias = ? WHERE name = ?;"
         self.c.execute(sql, alias, distro)
         self.commit()
 
     def insert_release(self, distro, release, alias=""):
+        """add release of distribution, alias is optional"""
+
         self.log.info("insert %s/%s ", distro, release)
         sql = "INSERT INTO releases (distro, release, alias) VALUES (?, ?, ?);"
         self.c.execute(sql, distro, release, alias)
         self.commit()
 
     def insert_supported(self, distro, release, target, subtarget="%"):
+        """set supported param to true, if subtarget is empty, all subtargets of target are supported"""
+
         self.log.info("insert supported {} {} {} {}".format(distro, release, target, subtarget))
         sql = """UPDATE subtargets SET supported = true
             WHERE distro=? and release=? and target=? and subtarget LIKE ?"""
@@ -51,6 +61,8 @@ class Database():
         self.commit()
 
     def get_releases(self, distro=None):
+        """get known releases, if distro is empty, get all releases"""
+
         if not distro:
             return self.c.execute("select distro, release from releases").fetchall()
         else:
@@ -125,35 +137,33 @@ class Database():
             if as_json:
                 return json.dumps({"packages": packages})
             else:
-                return set(packages)
+                return packages
         else:
             return response
 
-    def subtarget_outdated(self, distro, release, target, subtarget):
-        outdated_interval = 1
-        outdated_unit = 'day'
+    def outdated_package_index(self, distro, release, target, subtarget):
+        self.log.debug("insert packages of {}/{}/{}/{}".format(distro, release, target, subtarget))
         sql = """select 1 from subtargets
             where distro = ? and
             release = ? and
             target = ? and
             subtarget = ? and
-            last_sync < NOW() - INTERVAL '1 day';"""
+            package_sync < NOW() - INTERVAL '1 day';"""
         self.c.execute(sql, distro, release, target, subtarget)
         if self.c.rowcount == 1:
             return True
         else:
             return False
 
-    def subtarget_synced(self, distro, release, target, subtarget):
-        sql = """update subtargets set last_sync = NOW()
+    def insert_packages_available(self, distro, release, target, subtarget, packages):
+        self.log.debug("insert packages of {}/{}/{}/{}".format(distro, release, target, subtarget))
+        sql = """update subtargets set package_sync = NOW()
             where distro = ? and
             release = ? and
             target = ? and
             subtarget = ?;"""
         self.c.execute(sql, distro, release, target, subtarget)
 
-    def insert_packages_available(self, distro, release, target, subtarget, packages):
-        self.log.debug("insert packages of {}/{}/{}/{}".format(distro, release, target, subtarget))
         sql = """INSERT INTO packages_available VALUES (?, ?, ?, ?, ?, ?);"""
         for package in packages:
             name, version = package
@@ -189,7 +199,7 @@ class Database():
         self.log.debug("check_request")
         request_array = request.as_array()
         request_hash = get_hash(" ".join(request_array), 12)
-        sql = """select request_hash, status from image_requests
+        sql = """select id, request_hash, status from image_requests
             where request_hash = ?"""
         self.c.execute(sql, request_hash)
         if self.c.rowcount > 0:
@@ -201,7 +211,7 @@ class Database():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
             self.c.execute(sql, request_hash, *request_array)
             self.commit()
-            return('', 'requested')
+            return(0, '', 'requested')
 
     def request_imagebuilder(self, distro, release, target, subtarget):
         sql = """INSERT INTO image_requests
@@ -210,43 +220,41 @@ class Database():
         self.c.execute(sql, distro, release, target, subtarget, "imagebuilder")
         self.commit()
 
-    def get_image_path(self, request_hash):
-        self.log.debug("get sysupgrade image for %s", request_hash)
+    def get_image_path(self, image_id):
+        self.log.debug("get sysupgrade image for %s", image_id)
         sql = """select file_path
             from images_download join image_requests using (image_hash)
-            where request_hash = ?"""
-        self.c.execute(sql, request_hash)
+            where image_requests.id = ?"""
+        self.c.execute(sql, image_id)
         if self.c.rowcount > 0:
             return self.c.fetchone()[0]
         else:
             return False
 
-    def get_sysupgrade(self, request_hash):
-        self.log.debug("get image %s", request_hash)
+    def get_sysupgrade(self, image_id):
+        self.log.debug("get image %s", image_id)
         sql = """select file_path, file_name, checksum, filesize
             from images_download join image_requests using (image_hash)
-            where request_hash = ?"""
-        self.c.execute(sql, request_hash)
+            where image_requests.id = ?"""
+        self.c.execute(sql, image_id)
         if self.c.rowcount > 0:
             return self.c.fetchone()
         else:
             return False
 
-    def add_image(self, image_hash, image_array, checksum, filesize, sysupgrade_suffix, subtarget_in_name, profile_in_name, vanilla):
+    def add_image(self, image_hash, image_array, checksum, filesize):
         self.log.debug("add image %s", image_array)
         sql = """INSERT INTO images
-            (image_hash, distro, release, target, subtarget, profile, manifest_hash, network_profile, checksum, filesize, sysupgrade_suffix, build_date, subtarget_in_name, profile_in_name, vanilla)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?)"""
-        self.c.execute(sql,
-                image_hash,
-                *image_array,
-                checksum,
-                filesize,
-                sysupgrade_suffix,
-                'true' if subtarget_in_name else 'false', # dirty, outdated pyodbc?
-                'true' if profile_in_name else 'false',
-                'true' if vanilla else 'false')
+            (image_hash, distro, release, target, subtarget, profile, manifest_hash, network_profile, checksum, filesize, build_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        self.c.execute(sql, image_hash, *image_array, checksum, filesize, datetime.datetime.now())
         self.commit()
+        sql = """select id from images where image_hash = ?"""
+        self.c.execute(sql, image_hash)
+        if self.c.rowcount > 0:
+            return self.c.fetchone()[0]
+        else:
+            return False
 
     def add_manifest(self, manifest_hash):
         sql = """INSERT INTO manifest_table (hash) VALUES (?) ON CONFLICT DO NOTHING;"""
@@ -292,20 +300,12 @@ class Database():
         self.log.debug("no image request")
         return None
 
-    def get_image_requests_status(self, request_hash):
-        sql = "select status from image_requests where request_hash = ?"
-        self.c.execute(sql, request_hash)
-        if self.c.rowcount == 1:
-            return self.c.fetchone()[0]
-        else:
-            return False
-    
-    def set_image_requests_status(self, request_hash, status):
-        self.log.info("set image {} status to {}".format(request_hash, status))
+    def set_image_requests_status(self, image_request_hash, status):
+        self.log.info("set image {} status to {}".format(image_request_hash, status))
         sql = """UPDATE image_requests
             SET status = ?
             WHERE request_hash = ?;"""
-        self.c.execute(sql, status, request_hash)
+        self.c.execute(sql, status, image_request_hash)
         self.commit()
 
     def done_build_job(self, request_hash, image_hash):
@@ -379,13 +379,12 @@ class Database():
         self.log.debug("need worker for %s", result)
         return result
 
-    def worker_register(self, name, address, pubkey):
-        print(pubkey)
+    def worker_register(self, name=datetime.datetime.now(), address=""):
         self.log.info("register worker %s %s", name, address)
-        sql = """INSERT INTO worker (name, address, heartbeat, public_key)
-            VALUES (?, ?, ?, ?)
+        sql = """INSERT INTO worker (name, address, heartbeat)
+            VALUES (?, ?, ?)
             RETURNING id;"""
-        self.c.execute(sql, name, address, datetime.datetime.now(), pubkey)
+        self.c.execute(sql, name, address, datetime.datetime.now())
         self.commit()
         return self.c.fetchone()[0]
 
@@ -394,14 +393,6 @@ class Database():
         sql = """delete from worker where id = ?"""
         self.c.execute(sql, worker_id)
         self.commit()
-
-    def get_worker(self, worker_id):
-        sql = "select * from worker where id = ?"
-        result = self.c.execute(sql, worker_id)
-        if self.c.rowcount == 1:
-            return self.c.fetchone()
-        else:
-            return False
 
     def worker_add_skill(self, worker_id, distro, release, target, subtarget, status):
         self.log.info("register worker skill %s %s", worker_id, status)
@@ -433,7 +424,7 @@ class Database():
         return result
 
     def get_supported_distros(self):
-        sql = """select coalesce(array_to_json(array_agg(row_to_json(distributions))), '[]') from (select name, alias from distributions order by (alias)) as distributions;"""
+        sql = """select coalesce(array_to_json(array_agg(row_to_json(distributions))), '[]') from distributions;"""
         return self.c.execute(sql).fetchone()[0]
 
     def get_supported_releases(self, distro):
@@ -441,18 +432,12 @@ class Database():
         sql = """select coalesce(array_to_json(array_agg(row_to_json(releases))), '[]') from (select distro, release from releases where distro LIKE ? order by release desc) as releases;"""
         return self.c.execute(sql, distro).fetchone()[0]
 
-    def get_supported_models(self, search='', distro='', release=''):
-        search_like = '%' + search.lower() + '%'
+    def get_supported_models(self, model='', distro='', release=''):
+        model_search = '%' + model + '%'
         if distro == '': distro = '%'
         if release == '': release = '%'
-
-        sql = """select coalesce(array_to_json(array_agg(row_to_json(profiles))), '[]') from profiles where lower(model) LIKE ? and distro LIKE ? and release LIKE ?;"""
-        response = self.c.execute(sql, search_like, distro, release).fetchone()[0]
-        if response == "[]":
-            sql = """select coalesce(array_to_json(array_agg(row_to_json(profiles))), '[]') from profiles where (lower(target) LIKE ? or lower(subtarget) LIKE ? or lower(profile) LIKE ?)and distro LIKE ? and release LIKE ?;"""
-            response = self.c.execute(sql, search_like, search_like, search_like, distro, release).fetchone()[0]
-
-        return response
+        sql = """select coalesce(array_to_json(array_agg(row_to_json(profiles))), '[]') from profiles where lower(model) LIKE lower(?) and distro LIKE ? and release LIKE ?;"""
+        return self.c.execute(sql, model_search, distro, release).fetchone()[0]
 
     def get_subtargets_json(self, distro='%', release='%', target='%'):
         sql = """select coalesce(array_to_json(array_agg(row_to_json(subtargets))), '[]') from subtargets where distro like ? and release like ? and target like ?;"""
@@ -481,9 +466,10 @@ class Database():
 
     def get_image_info(self, image_hash):
         self.log.debug("get image info %s", image_hash)
-        sql = """select * from images_info where image_hash = ?"""
+        sql = """select * from images"""
         self.c.execute(sql, image_hash)
-        return(dict(zip([column[0] for column in self.c.description], self.c.fetchone())))
+        result = self.c.fetchone()
+        return result
 
     def get_manifest_info(self, manifest_hash):
         self.log.debug("get manifest info %s", manifest_hash)

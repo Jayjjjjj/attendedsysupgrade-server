@@ -56,13 +56,13 @@ class ImageRequest(Request):
             self.network_profile = ''
 
         self.imagemeta = ImageMeta(self.distro, self.release, self.target, self.subtarget, self.profile, self.packages, self.network_profile)
-        request_id, request_hash, request_status = self.database.check_request(self.imagemeta)
+        request_hash, request_status = self.database.check_request(self.imagemeta)
         self.log.debug("found image in database: %s", request_status)
         if  request_status == "created":
             if not sysupgrade:
-                file_path = self.database.get_image_path(request_id)
+                file_path = self.database.get_image_path(request_hash)
             else:
-                file_path, file_name, checksum, filesize = self.database.get_sysupgrade(request_id)
+                file_path, file_name, checksum, filesize = self.database.get_sysupgrade(request_hash)
                 sysupgrade_url = "{}/static/{}{}".format(self.config.get("update_server"), file_path, file_name)
                 self.response_dict["sysupgrade"] = sysupgrade_url
                 # this is somewhat outdated

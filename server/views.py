@@ -7,6 +7,7 @@ import socket
 import os
 import logging
 from http import HTTPStatus
+import zipfile
 
 from server.update_request import UpdateRequest
 from server.image_request import ImageRequest
@@ -15,7 +16,7 @@ from server import app
 import utils
 from utils.config import Config
 from utils.database import Database
-from utils.common import get_dir, create_folder, init_usign
+from utils.common import get_dir, create_folder, usign_init, get_folder, usign_verify
 
 database = Database()
 config = Config()
@@ -162,3 +163,77 @@ def image_info(manifest_hash):
 @app.route("/contact")
 def contact():
     return render_template("contact.html")
+
+import os
+from flask import Flask, request, redirect, url_for
+from werkzeug.utils import secure_filename
+
+@app.route("/upload-image", methods=['POST'])
+def upload_image():
+    print(request.form)
+
+    if 'request_hash' not in request.form:
+        print('no request_hash')
+        return "no image_hash", HTTPStatus.BAD_REQUEST
+
+    request_hash = request.form["request_hash"]
+    status = database.get_image_requests_status(request_hash)
+    print(status)
+    if status != "created":
+        print("bad request id")
+        return "bad request id", HTTPStatus.BAD_REQUEST
+
+    archive_name = request_hash + ".zip"
+    signature_name = archive_name + ".sig"
+
+        # TODO very requsted
+
+    if 'worker_id' not in request.form:
+        print("no worker id")
+        return "no worker_id", HTTPStatus.BAD_REQUEST
+
+    worker_id = request.form["worker_id"]
+
+    if 'signature' not in request.files:
+        print("no signature")
+        return "no signature", HTTPStatus.BAD_REQUEST
+
+    signature = request.files["signature"]
+    if signature.filename != signature_name:
+        print('bad signature')
+        return "bad signature", HTTPStatus.BAD_REQUEST
+    signature.save(os.path.join(get_folder("tempdir"), signature_name))
+
+    if 'archive' not in request.files:
+        print("no archive")
+        return "no archive", HTTPStatus.BAD_REQUEST
+
+    archive = request.files["archive"]
+    if archive.filename != archive_name:
+        print('bad archive')
+        return "bad archive", HTTPStatus.BAD_REQUEST
+
+    archive.save(os.path.join(get_folder("tempdir"), archive_name))
+
+    worker = database.get_worker(worker_id)
+    if not  worker:
+        print("bad worker id")
+        return "bad worker id", HTTPStatus.BAD_REQUEST
+
+    worker_pubkey = worker[3]
+
+    archive_path = os.path.join(get_folder("tempdir"), archive_name)
+
+    if usign_verify(archive_path, worker_pubkey):
+        image_path = database.get_image_path(request_hash)
+        image_path_abs = os.path.join(get_folder("downloaddir"), image_path)
+        create_folder(image_path_abs)
+        zip_ref = zipfile.ZipFile(archive_path, 'r')
+        zip_ref.extractall(image_path_abs)
+        zip_ref.close()
+        database.set_image_requests_status(request_hash, "ready")
+        print("file extracted")
+        return "all done", HTTPStatus.OK
+    else:
+        print("bad signature")
+        return "bad signature", HTTPStatus.BAD_REQUEST

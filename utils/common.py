@@ -18,6 +18,7 @@ from utils.config import Config
 config = Config()
 
 def create_folder(folder):
+    logging.debug(folder)
     try:
         if not os.path.exists(folder):
             os.makedirs(folder)
@@ -67,6 +68,7 @@ def get_release_config(distro, release):
 
 def get_folder(requested_folder):
     folder = config.get(requested_folder)
+    print(folder)
     if folder:
         if create_folder(folder):
             return os.path.abspath(folder)
@@ -109,7 +111,7 @@ def check_signature(path):
     verified = gpg.verify_file(open(os.path.join(path, "sha256sums.gpg"), "rb"), os.path.join(path, "sha256sums"))
     return verified.valid
 
-def init_usign():
+def usign_init():
     key_folder = get_folder("key_folder")
     if not os.path.exists(key_folder + "/secret"):
         print("create keypair")
@@ -132,11 +134,13 @@ def init_usign():
 def get_pubkey():
     key_folder = get_folder("key_folder")
     with open(os.path.join(key_folder, "public"), "r") as pubkey_file:
-        return pubkey_file.readlines()[1].strip()
+        return pubkey_file.read()
 
-def sign_file(image_path):
+def usign_sign(file_path, stdout=False):
     key_folder = get_folder("key_folder")
-    cmdline = ['usign', '-S', '-s', 'secret', '-m', image_path]
+    cmdline = ['usign', '-S', '-s', 'secret', '-m', file_path]
+    if stdout:
+        cmdline.extend(['-x', '-'])
     proc = subprocess.Popen(
         cmdline,
         cwd=key_folder,
@@ -148,7 +152,28 @@ def sign_file(image_path):
     return_code = proc.returncode
     if not return_code == 0:
         return False
-    return True
+    if stdout:
+        return output.decode("utf-8").split("\n")[1]
+    else:
+        return True
+
+def usign_verify(file_path, pubkey):
+    key_folder = get_folder("key_folder")
+    # better way then using echo?
+    cmdline = ['echo', pubkey, '|', 'usign', '-V', '-p', '-', '-m', file_path]
+    proc = subprocess.Popen(
+        cmdline,
+        cwd=key_folder,
+        stdout=subprocess.PIPE,
+        shell=False,
+        stderr=subprocess.STDOUT
+    )
+    output, _ = proc.communicate()
+    return_code = proc.returncode
+    if not return_code == 0:
+        return False
+    else:
+        return True
 
 def pkg_hash(packages):
     packages = sorted(list(set(packages)))
