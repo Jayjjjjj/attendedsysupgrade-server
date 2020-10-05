@@ -1,153 +1,186 @@
-# Attendedsysupgrade Server for LEDE/OpenWrt (GSoC 2017)
+# Attendedsysupgrade Server for OpenWrt (GSoC 2017)
 
-This project intend to simplify the sysupgrade process of LEDE/LibreMesh. The provided tools here offer an easy way to reflash the router with a new release or package updates, without the need of `opkg` installed.
+[![codecov](https://codecov.io/gh/aparcar/asu/branch/master/graph/badge.svg)](https://codecov.io/gh/aparcar/asu)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![PyPi](https://badge.fury.io/py/asu.svg)](https://badge.fury.io/py/asu)
 
-![luci-app-attendedsysupgrade-screenshot](https://camo.githubusercontent.com/d21d3c2e43993325c0371866b28f09a67ea21902/687474703a2f2f692e696d6775722e636f6d2f653443716841502e706e67)
+This project intends to simplify the sysupgrade process of devices running
+OpenWrt or distributions based on the former like LibreMesh. The provided tools
+here offer an easy way to reflash the router with a new version or package
+upgrades, without the need of `opkg` installed.
+
+Additionally it offers an API (covered below) to request custom images with any
+selection of packages pre-installed, allowing to create firmware images without
+the need of setting up a build environment, even from mobile devices.
 
 ## Clients
 
-#### [`luci-app-attendedsysupgrade`](https://github.com/openwrt/luci/tree/master/applications/luci-app-attendedsysupgrade)
+### Yet another firmware selector
 
-Add a view to the Luci system tab called "Attended Sysupgrade". Offers a button to search for updates and if found, to flash the image created by the update server.
+Simple web interface using vanilla JavaScript currently developed by @mwarning.
+It offers a device search based on model names and show links either to
+[official images](https://downloads.openwrt.org/) or requests images via the
+_asu_ API. Please join in the development at the [GitHub
+repository](https://github.com/mwarning/yet_another_firmware_selector)
 
-**Dependencies:**
-* `rpcd-mod-rpcsys`
-	Used to read list of installed packages and trigger sysupgrade on the target.
-* `uhttpd-mod-ubus`
-	Communication between the Browser and the Router
-* `cgi-io`
-	Upload image from Browser to Router
+![yafs](misc/yafs.png)
 
-#### [`auc`](https://github.com/openwrt/packages/tree/master/utils/auc)
+### LuCI app
 
-Add CLI to perform sysupgrades.
+The package
+[`luci-app-attendedsysupgrade`](https://github.com/openwrt/luci/tree/master/applications/luci-app-attendedsysupgrade)
+offers a simple view under `System > Attended Sysupgrade` to automatically
+request a new firmware, wait until it is build and flash it.
 
-**Dependencies:**
-* `rpcd-mod-rpcsys`
-	Used to read list of installed packages and trigger sysupgrade on the target.
-* `usteam-ssl` and `ca-certificates`
-	Securely communicate and download firmware from server via https
+![luci](misc/luci.png)
 
 ## Server
 
-The server listens to update and image requests. Images are auto generated if the requests was valid. LEDE ImageBuilder is automatically setup up on first request of distribution, release, target & subtarget.
-
-All requests are stored in a queue and build by workers.
+The server listens to image requests and automatically generate them if the
+request was valid. This is done by automatically setting up OpenWrt
+ImageBuilders and cache images in a Redis database. This allows to quickly
+respond to requests without rebuilding existing images again.
 
 ### Active server
 
-* [planetexpress](https://ledeupdate.planetexpress.cc) - thanks @egon0
-  You can set this server in `/etc/config/attendedsysupgrade` after installation of a client
+-   [chef.libremesh.org](https://chef.libremesh.org)
+
+## Run your own server
+
+Redis is required to store image requests:
+
+    sudo apt install redis-server tar
+
+Install _asu_:
+
+    pip install asu
+
+Start the server via the following commands:
+
+    export FLASK_APP=asu  # set Flask app to asu
+    flask janitor update  # download upstream profiles/packages
+    flask run             # run development server
+
+Start the worker via the following comand:
+
+    rq worker
+
+### Production
+
+It is recommended to run _ASU_ via `gunicorn` proxied by `nginx`. Find a
+possible `nginx` configuration in the `misc/` folder. Also the setup should not
+HTTPS to allow clients without SSL/certificates to check for upgrades.
+
+To change the default setting place a file called `config.py` in the root of
+the [instance
+folder](https://flask.palletsprojects.com/en/1.1.x/config/#instance-folders).
+Find an example in the `misc/` folder.
+
+    pip install gunicorn
+    gunicorn "asu:create_app()"
+
+### Development
+
+After cloning this repository create a Python virtual environment and install
+the dependencies:
+
+    python3 -m venv .
+    source bin/activate
+    pip install -r requirements.txt
+    export FLASK_APP=asu  # set Flask app to asu
+    export FLASK_DEBUG=1  # run Flask in debug mode (autoreload)
+    flask run
 
 ## API
 
-### Upgrade check `/api/upgrade-check`
+### Upgrade check `/api/versions`
 
-Sends information about the device to the server to see if a new distribution release or package upgrades are available. An *upgrade check* could look like this:
+The server does no longer offer complex upgrade but only serves static JSON
+files including available versions. For now the client must evaluate if the
+responded JSON contains a newer version.
 
-| key	| value | information	|
-| ---	| ---	| ---		|
-| `distro` | `LEDE` | installed distribution |
-| `version` | `17.01.0` | installed release |
-| `target` | `ar71xx` | |
-| `subtarget` | `generic` | |
-| `packages` | `{libuci-lua: 2017-04-12-c4df32b3-1, cgi-io: 3, ...}` | all user installed packages |
+### Build request `/api/build`
 
-Most information can be retrieved via `ubus call system board`. Missing information can be gathered via the `rpcd-mod-rpcsys` package.
-`packages` contains all user installed packages plus version. Packages installed as an dependence are excluded as they've been automatically and dependencies may change between releases.
+| key        | value                 | information                              |
+| ---------- | --------------------- | ---------------------------------------- |
+| `version`  | `SNAPSHOT`            | installed version                        |
+| `profile`  | `netgear_wndr4300-v2` | `board_name` of `ubus call system board` |
+| `packages` | `["luci", "vim"]`     | Extra packages for the new image         |
 
-It's also possible to check for a new release without sending packages by removing `packages` from the request.
-
-### Response `status 200`
-
-The server validates the request. Below is a possible response for a new release:
-
-| key		| value		| information	|
-| ---		| ---		| ---		|
-| `version`		| `17.01.2`		| newest release |
-| `upgrades`	| `{luci-lib-jsonc: [git-17.230.25723-2163284-1, git-17.228.56579-209deb5-1], ...}` | Package updates `[new_version, current_version]` |
-| `packages`	| `[libuci-lua, cgi-io: 3, ...]` | All packages for the new image |
-
-See [other status codes](#response-status-codes)
-
-An release upgrade does not ignore package upgrades for the following reason. Between releases it possible that package names may change, packages are dropped or merged. The *response* contains all packages included changed ones.
-
-The *upgrade check response* should be shown to the user in a readable way.
-
-### Upgrade request `/api/upgrade-request`
-
-Once the user decides to perform the sysupgrade a new request is send to the server called *upgrade request*.
-
-#### POST
-
-| key		| value					| information	|
-| ---		| ---					| ---		|
-| `distro`	| `LEDE`				| installed distribution |
-| `version`	| `17.01.2`					| installed release |
-| `target`	| `ar71xx`				| |
-| `subtarget`	| `generic`					| |
-| `board`	| `tl-wdr4300-v1`			| `board_name` of `ubus call system board` |
-| `[model]`		| `TP-Link TL-WDR4300 v1`		| `model` of `ubus call system board`. This is optional and a fallback |
-| `packages`	| `[libuci-lua, cgi-io: 3, ...]`	| All packages for the new image |
-
-The *upgrade request* is nearly the same as the *upgrade check* before, except only containing package names without version and adding `board` and possibly `model`. While the server builds the requested image the clients keeps polling the server sending a `request_hash` via `GET` to the server.
-
-#### GET
-
-If the `request_hash` was retrieved the client should switch to `GET` requests with the hash to save the server from validating the request again.
-
-`api/upgrade-request/<request_hash`
+Each valid request returns a `request_hash` which can be used for future
+polling via `/api/build/<request_hash>`.
 
 ### Response `status 200`
 
-| key	| value | information	|
-| ---	| ---	| ---		|
-| `sysupgrade` | `https://betaupdate.libremesh.o…x86-64-Generic-sysupgrade.bin` | download link |
-| `image_hash` | `27439cbc07fae59` | Hash of image parameters, like distribution, profile, packages and versions |
+A `200` response means the image was sucessfully created. The response is JSON
+encoded containing build information.
 
-See [other status codes](#response-status-codes)
+| key            | information                                 |
+| -------------- | ------------------------------------------- |
+| `bin_dir`      | relative path to created files              |
+| `buildlog`     | boolean if buildlog.txt was created         |
+| `manifest`     | dict of all installed packages plus version |
+| `request_hash` | hashed request data stored by the server    |
 
-### Build request `/api/build-request`
-
-It's also possible to request to build an image. The request is exactly the same as for `upgrade-request`. The response only contains a link to the created `files` or `upgrade-request` parameters if available.
-
-This is a special case for clients that do not necessary require a sysupgrade compatible image. An example is the [LibreMesh Chef](https://chef.libremesh.org) firmware builder.
+    {
+      "build_at": "Tue, 25 Feb 2020 08:49:48 GMT",
+      "enqueued_at": "Tue, 25 Feb 2020 08:49:09 GMT",
+      "id": "avm_fritzbox-4040",
+      "image_prefix": "openwrt-387e9d003d04-ipq40xx-generic-avm_fritzbox-4040",
+      "images": [
+        {
+          "name": "openwrt-387e9d003d04-ipq40xx-generic-avm_fritzbox-4040-squashfs-eva.bin",
+          "sha256": "8cb0d58bf672ed442f0813a1f04ec2f5edf6e2b64c8f117cb11158e19251aa0b",
+          "type": "eva"
+        },
+        {
+          "name": "openwrt-387e9d003d04-ipq40xx-generic-avm_fritzbox-4040-squashfs-sysupgrade.bin",
+          "sha256": "0d12ce60dd63422a63ed28f0e2a2ab2d367a407ccc32b665c28c809f3cb073f1",
+          "type": "sysupgrade"
+        }
+      ],
+      "manifest": {
+        "ath10k-firmware-qca4019-ct": "2019-10-03-d622d160-1",
+        "base-files": "213-r12297-7e9c7e7b2d",
+        "busybox": "1.31.1-1",
+        "cgi-io": "17",
+        "dnsmasq": "2.80-18",
+        [...]
+        "uclient-fetch": "2020-01-05-fef6d3d3-1",
+        "uhttpd": "2020-02-12-2ee323c0-1",
+        "urandom-seed": "1.0-1",
+        "urngd": "2020-01-21-c7f7b6b6-1",
+        "usign": "2019-09-21-f34a383e-1",
+        "vim": "8.1-6",
+        "wireless-regdb": "2019.06.03",
+        "wpad-basic": "2019-08-08-ca8c2bd2-6",
+        "zlib": "1.2.11-3"
+      },
+      "metadata_version": 1,
+      "request_hash": "5bac6cb8321f",
+      "supported_devices": [
+        "avm,fritzbox-4040"
+      ],
+      "target": "ipq40xx/generic",
+      "titles": [
+        {
+          "model": "FRITZ!Box 4040",
+          "vendor": "AVM"
+        }
+      ],
+      "version_commit": "r12297-7e9c7e7b2d",
+      "version_number": "SNAPSHOT"
+    }
 
 ### Response status codes
 
 The client should check the status code:
 
-| status	| meaning												| information	|
-| ---		| ---								| ---			|
-| 200		| build finish / upgrade available	| see parameters of `upgrade-check`, `upgrade-request` or `build-request` |
-| 202		| building, queued, imagebuilder setup	| building right now, in build queue, imagebuilder not ready. Details are in header `X-Imagebuilder-Status` and `X-Build-Queue-Position` |
-| 204		| no updates						| device is up to date. Contains `request_hash` |
-| 400		| bad request 						| see `error` parameter |
-| 413		| imagesize fail					| produced image too big for device |
-| 422		| unknown package					| unknown package in request |
-| 500		| build failed						| see `log` for build log	|
-| 501		| no sysupgrade						| image build successful but no sysupgrade image created |
-| 502		| proxy backend down				| nginx runs but python part is down, likely maintenance |
-| 503		| server overload					| please wait ~5 minutes |
-
-### Request data
-
-It's also possible to receive information about build images or package versions, available devices and more. All responses are in `JSON` format.
-
-* `/api/image/<image_hash>`
-	Get information about an image. This contains various information stored about the image.
-
-* `/api/manifest/<manifest_hash>`
-	Get packages and versions of a manifest. The manifest contains all installed packages of an image. The `manifest_hash` can be received by the api call `/api/image`
-
-* `/api/distro`
-	Get all supported distros
-
-* `/api/releases[?distro=<distribution>]`
-	Get all supported releases (of distribution)
-
-* `/api/models?distro=&release=&model_search=<search string>`
-	Get all supported devices of distro/release that contain the `model_search` string
-
-* `/api/packages_image?distro=&release=&target=&subtarget=&profile=`
-	Get all default packages installed on an image
+| status | meaning                              | information                                                        |
+| ------ | ------------------------------------ | ------------------------------------------------------------------ |
+| `200`  | build finish / upgrade available     | see parameters above                                               |
+| `202`  | building, queued, imagebuilder setup | building right now or in build queue                               |
+| `400`  | bad request                          | see `error` parameter                                              |
+| `404`  | not found                            | if invalid `request_hash` supplied via `/api/build/<request_hash>` |
+| `422`  | unknown package                      | unknown package in request                                         |
+| `500`  | build failed                         | see `log` for build log                                            |
